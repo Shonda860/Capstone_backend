@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -11,7 +12,7 @@ import (
 	_ "github.com/jackc/pgx/v4/stdlib"
 )
 
-// vote struct contains a single row from the votes table in the database.
+// Vote struct contains a single row from the votes table in the database.
 // Each vote includes a artist and video id
 type Vote struct {
 	Artist   string
@@ -23,11 +24,66 @@ type Vote struct {
 // app struct contains global state.
 type app struct {
 	// db is the global database connection pool.
-	db *sql.DB
+	db      *sql.DB
+	baseURL string
+}
+
+// homePage will be a simple "hello World" style page
+func homePage(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "Hello World")
+}
+
+func (app *app) youtubeSearchHandler(w http.ResponseWriter, r *http.Request) {
+	// cors handling
+	setupResponse(&w, r)
+
+	switch r.Method {
+	case "GET":
+		req, err := http.NewRequest("GET", app.baseURL+"/search", nil)
+		if err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
+		params := r.URL.Query()
+		params.Add("key", mustGetenv("YOUTUBE_API_KEY"))
+		req.URL.RawQuery = params.Encode()
+
+		fmt.Println(req.URL.String())
+
+		// send request
+		client := &http.Client{}
+		resp, _ := client.Do(req)
+
+		// foward response
+
+		// make sure body gets closed when this function exits
+		defer resp.Body.Close()
+
+		// read entire response body
+		body, err := ioutil.ReadAll(resp.Body)
+
+		if err != nil {
+			http.Error(w, "error reading response body", http.StatusInternalServerError)
+			return
+		}
+
+		// write status code and body from proxy request into the answer
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+
+	default:
+		http.Error(w, fmt.Sprintf("HTTP Method %s Not Allowed", r.Method), http.StatusMethodNotAllowed)
+	}
+	return
 }
 
 // indexHandler handles requests to the / route.
 func (app *app) indexHandler(w http.ResponseWriter, r *http.Request) {
+	setupResponse(&w, r)
+	if (*r).Method == "OPTIONS" {
+		return
+	}
 	switch r.Method {
 	case "GET":
 		if err := showTotals(w, r, app); err != nil {
@@ -46,6 +102,7 @@ func (app *app) indexHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	app := &app{}
+	app.baseURL = "https://www.googleapis.com/youtube/v3"
 	var err error
 	// If the optional DB_TCP_HOST environment variable is set, it contains
 	// the IP address and port number of a TCP connection pool to be created,
@@ -70,6 +127,8 @@ func main() {
 		log.Fatalf("DB.Exec: unable to create table: %s", err)
 	}
 
+	http.HandleFunc("/search", app.youtubeSearchHandler)
+
 	http.HandleFunc("/", app.indexHandler)
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -81,6 +140,12 @@ func main() {
 		log.Fatal(err)
 	}
 
+}
+
+func setupResponse(w *http.ResponseWriter, r *http.Request) {
+	(*w).Header().Set("Access-Control-Allow-Origin", "*")
+	(*w).Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+	(*w).Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
 }
 
 // showTotals renders json for total number of votes for artist.
@@ -119,38 +184,20 @@ func showTotals(w http.ResponseWriter, r *http.Request, app *app) error {
 
 // saveVote saves a vote passed as http.Request form data.
 func saveVote(w http.ResponseWriter, r *http.Request, app *app) error {
-	if err := r.ParseForm(); err != nil {
-		return fmt.Errorf("Request.ParseForm: %v", err)
-	}
-
-	artist := r.FormValue("artist")
-	if artist == "" {
-		return fmt.Errorf("artist property missing from form submission")
-	}
-
-	videoID := r.FormValue("videoId")
-	if videoID == "" {
-		return fmt.Errorf("videoId property missing from form submission")
-	}
-	userName := r.FormValue("userName")
-	if userName == "" {
-		return fmt.Errorf("userName property missing from form submission")
-	}
-	tagID := r.FormValue("tagId")
-	if tagID == "" {
-		return fmt.Errorf("tagId property missing from form submission")
+	var vote Vote
+	if err := json.NewDecoder(r.Body).Decode(&vote); err != nil {
+		return fmt.Errorf("JSON DECODE: %v", err)
 	}
 
 	// [START cloud_sql_postgres_databasesql_connection]
 	sqlInsert := "INSERT INTO votes(artist_name,video_id,user_name,tag_id)VALUES($1, $2, $3, $4)"
 
-	if _, err := app.db.Exec(sqlInsert, artist, videoID, userName, tagID); err != nil {
+	if _, err := app.db.Exec(sqlInsert, vote.Artist, vote.VideoID, vote.UserName, vote.TagID); err != nil {
 		fmt.Fprintf(w, "unable to save vote: %s", err)
 		return fmt.Errorf("DB.Exec: %v", err)
-	} else {
-		fmt.Fprintf(w, "Vote successfully cast for %s!\n", artist)
 	}
 
+	fmt.Fprintf(w, "Vote successfully cast for %s!\n", vote.Artist)
 	return nil
 	// [END cloud_sql_postgres_databasesql_connection]
 }
@@ -205,13 +252,13 @@ func initTCPConnectionPool() (*sql.DB, error) {
 	var (
 		dbUser    = mustGetenv("DB_USER")
 		dbPwd     = mustGetenv("DB_PASS")
-		dbTcpHost = mustGetenv("DB_TCP_HOST")
+		dbTCPHost = mustGetenv("DB_TCP_HOST")
 		dbPort    = mustGetenv("DB_PORT")
 		dbName    = mustGetenv("DB_NAME")
 	)
 
 	var dbURI string
-	dbURI = fmt.Sprintf("host=%s user=%s password=%s port=%s database=%s", dbTcpHost, dbUser, dbPwd, dbPort, dbName)
+	dbURI = fmt.Sprintf("host=%s user=%s password=%s port=%s database=%s", dbTCPHost, dbUser, dbPwd, dbPort, dbName)
 
 	// dbPool is the pool of database connections.
 	dbPool, err := sql.Open("pgx", dbURI)
