@@ -78,6 +78,23 @@ func (app *app) youtubeSearchHandler(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+func (app *app) userHandler(w http.ResponseWriter, r *http.Request) {
+	setupResponse(&w, r)
+	if (*r).Method == "OPTIONS" {
+		return
+	}
+	switch r.Method {
+	case "GET":
+		if err := userShowTotals(w, r, app); err != nil {
+			log.Printf("userShowTotals: %v", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
+	default:
+		http.Error(w, fmt.Sprintf("HTTP Method %s Not Allowed", r.Method), http.StatusMethodNotAllowed)
+	}
+	return
+}
+
 // indexHandler handles requests to the / route.
 func (app *app) indexHandler(w http.ResponseWriter, r *http.Request) {
 	setupResponse(&w, r)
@@ -90,6 +107,10 @@ func (app *app) indexHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("showTotals: %v", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
+		// if err := userShowTotals(w, r, app); err != nil {
+		// 	log.Printf("userShowTotals: %v", err)
+		// 	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		// }
 	case "POST":
 		if err := saveVote(w, r, app); err != nil {
 			log.Printf("saveVote: %v", err)
@@ -128,7 +149,7 @@ func main() {
 	}
 
 	http.HandleFunc("/search", app.youtubeSearchHandler)
-
+	http.HandleFunc("/user", app.userHandler)
 	http.HandleFunc("/", app.indexHandler)
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -139,7 +160,6 @@ func main() {
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal(err)
 	}
-
 }
 
 func setupResponse(w *http.ResponseWriter, r *http.Request) {
@@ -200,6 +220,45 @@ func saveVote(w http.ResponseWriter, r *http.Request, app *app) error {
 	fmt.Fprintf(w, "Vote successfully cast for %s!\n", vote.Artist)
 	return nil
 	// [END cloud_sql_postgres_databasesql_connection]
+}
+
+//  showTotals renders json for total number of votes for artist.
+func userShowTotals(w http.ResponseWriter, r *http.Request, app *app) error {
+	// get total votes for each artist
+	artist := r.URL.Query().Get("artist")
+	if artist == "" {
+		return fmt.Errorf("artist property missing from form submission")
+	}
+	videoID := r.URL.Query().Get("videoId")
+	if videoID == "" {
+		return fmt.Errorf("videoId property missing from form submission")
+	}
+	userName := r.URL.Query().Get("userName")
+	if userName == "" {
+		return fmt.Errorf("userName property missing from form submission")
+	}
+	sqlSelect := "SELECT tag_id FROM votes WHERE artist_name=$1 AND video_id=$2 AND user_name=$3 "
+	rows, err := app.db.Query(sqlSelect, artist, videoID, userName)
+
+	userVoteCount := make(map[string]int)
+
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			// do something with error
+		} else {
+			userVoteCount[tag]++
+		}
+	}
+	// fmt.Fprintf(w, "object for user data %v ", userVoteCount)
+	js, err := json.Marshal(userVoteCount)
+	if err != nil {
+		panic(err)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(js)
+	return nil
 }
 
 // mustGetEnv is a helper function for getting environment variables.
