@@ -250,7 +250,7 @@ func userShowTotals(w http.ResponseWriter, r *http.Request, app *app) error {
 			userVoteCount[tag]++
 		}
 	}
-	// fmt.Fprintf(w, "object for user data %v ", userVoteCount)
+
 	js, err := json.Marshal(userVoteCount)
 	if err != nil {
 		panic(err)
